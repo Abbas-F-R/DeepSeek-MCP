@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../logging/logger.js';
+import { PACKAGE_ROOT } from '../config/index.js';
 
 export class PromptManager {
   private static instance: PromptManager;
@@ -8,7 +9,16 @@ export class PromptManager {
   private cache: Map<string, string> = new Map();
 
   private constructor() {
-    this.promptsDir = path.resolve(process.cwd(), 'prompts');
+    const pkgPrompts = path.resolve(PACKAGE_ROOT, 'prompts');
+    const cwdPrompts = path.resolve(process.cwd(), 'prompts');
+
+    if (fs.existsSync(pkgPrompts)) {
+      this.promptsDir = pkgPrompts;
+    } else if (fs.existsSync(cwdPrompts)) {
+      this.promptsDir = cwdPrompts;
+    } else {
+      this.promptsDir = pkgPrompts;
+    }
   }
 
   public static getInstance(): PromptManager {
@@ -25,13 +35,14 @@ export class PromptManager {
     let template = this.cache.get(fileName);
 
     if (!template) {
-      if (!fs.existsSync(filePath)) {
-        logger.error(`[PromptManager] Prompt file not found: ${filePath}`);
-        throw new Error(`Prompt template '${fileName}' not found in ${this.promptsDir}`);
+      if (fs.existsSync(filePath)) {
+        template = fs.readFileSync(filePath, 'utf-8');
+        this.cache.set(fileName, template);
+        logger.info(`[PromptManager] Loaded prompt template '${fileName}' into cache`);
+      } else {
+        logger.warn(`[PromptManager] Prompt file not found: ${filePath}. Using inline default template.`);
+        template = `Task Prompt:\n{{spec}}\n{{content}}\n{{context}}`;
       }
-      template = fs.readFileSync(filePath, 'utf-8');
-      this.cache.set(fileName, template);
-      logger.info(`[PromptManager] Loaded prompt template '${fileName}' into cache`);
     }
 
     // Replace variables in template e.g. {{variable}}
@@ -52,3 +63,4 @@ export class PromptManager {
     logger.info('[PromptManager] Cache cleared.');
   }
 }
+

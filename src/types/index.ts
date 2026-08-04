@@ -13,6 +13,7 @@ export interface ChatOptions {
   systemPrompt?: string;
   stream?: boolean;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max' | string;
+  tools?: any[];
 }
 
 export interface TokenUsage {
@@ -24,10 +25,12 @@ export interface TokenUsage {
 export interface ProviderResponse {
   content: string;
   reasoningContent?: string;
+  toolCalls?: any[];
   usage?: TokenUsage;
   modelUsed: string;
   executionTimeMs: number;
 }
+
 
 export interface HealthCheckResult {
   status: 'ok' | 'degraded' | 'down';
