@@ -44,7 +44,7 @@ describe('MCP server protocol', () => {
     assert.match(brief, new RegExp(`root: ${sandbox.root}`));
     assert.match(brief, /lang=TypeScript/);
     assert.match(brief, /framework=Express\.js/);
-    assert.match(brief, /No chat threads yet/);
+    assert.match(brief, /No threads yet/);
   });
 
   test('a chat thread can be opened, saved and read back', async () => {
@@ -80,7 +80,7 @@ describe('MCP server protocol', () => {
     assert.match(legacy, /Prefer composition over inheritance/);
 
     const legacyRule = await client.callOk('subagent_memory', { action: 'add_rule', custom_rule: 'Log with context' });
-    assert.match(legacyRule, /Stored project rule/);
+    assert.match(legacyRule, /Stored rule \[/);
   });
 
   test('review reads a path from the project instead of pasted content', async () => {
@@ -189,7 +189,7 @@ describe('root detection without PROJECT_ROOT', () => {
     try {
       const brief = await client.callOk('memory', { action: 'brief' });
       assert.match(brief, new RegExp(`root: ${sandbox.root}`));
-      assert.ok(sandbox.exists('.agent/project.json'), 'state belongs to the project root, not the subdirectory');
+      assert.ok(sandbox.exists('.agent/memory/PROJECT.md'), 'state belongs to the project root, not the subdirectory');
       assert.equal(sandbox.exists('src/.agent'), false);
     } finally {
       client.stop();

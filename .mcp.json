@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "deepseek-subagents": {
-      "command": "node",
-      "args": ["/Users/moamalwork/Documents/Holy/DeepseekMCP/dist/index.js"]
-    }
-  }
-}

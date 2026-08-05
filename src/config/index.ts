@@ -18,6 +18,15 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 const configuredModel = process.env.DEEPSEEK_MODEL || process.env.DEEPSEEK_DEFAULT_CHAT_MODEL || 'deepseek-v4-flash';
 
+/** Plugin version, read from the package manifest so it cannot drift. */
+export const VERSION: string = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf-8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
 export interface Config {
   deepseek: {
     apiKey: string;
@@ -26,6 +35,8 @@ export interface Config {
     defaultChatModel: string;
     defaultReasonerModel: string;
     defaultReasoningEffort: string;
+    /** Token budget a subagent's history is shaped against. */
+    contextWindow: number;
   };
   orchestrator: {
     defaultProvider: string;
@@ -33,8 +44,6 @@ export interface Config {
     defaultTimeoutMs: number;
     maxRetries: number;
     logLevel: string;
-    port: number;
-    transport: 'sse' | 'stdio' | 'both';
   };
 }
 
@@ -46,6 +55,7 @@ export const config: Config = {
     defaultChatModel: configuredModel,
     defaultReasonerModel: process.env.DEEPSEEK_DEFAULT_REASONER_MODEL || configuredModel,
     defaultReasoningEffort: process.env.DEEPSEEK_REASONING_EFFORT || 'max',
+    contextWindow: parseInt(process.env.DEEPSEEK_CONTEXT_WINDOW || '128000', 10),
   },
   orchestrator: {
     defaultProvider: process.env.DEFAULT_PROVIDER || 'deepseek',
@@ -53,8 +63,6 @@ export const config: Config = {
     defaultTimeoutMs: parseInt(process.env.DEFAULT_TIMEOUT_MS || '120000', 10),
     maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
     logLevel: process.env.LOG_LEVEL || 'info',
-    port: parseInt(process.env.PORT || '3000', 10),
-    transport: (process.env.MCP_TRANSPORT as any) || (process.argv.includes('--sse') ? 'sse' : 'stdio'),
   },
 };
 

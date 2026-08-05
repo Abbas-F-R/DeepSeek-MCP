@@ -2,8 +2,8 @@
 
 Delegate bounded coding sub-tasks — generate a file, write a test suite, audit a
 folder, find where something lives — to DeepSeek subagents that read and write the
-project directly. Their file reads, searches and tool loops happen inside the MCP
-server, so only the final answer reaches Claude's context.
+project directly. Their file reads, searches and tool loops happen out of process,
+so only the final answer reaches Claude's context.
 
 ## Install
 
@@ -32,9 +32,8 @@ Restart Claude Code (or `/reload-plugins`) afterwards.
 | `/deepseek-subagents:explore` | Find code and answer structure questions |
 | `/deepseek-subagents:save` | Record where this chat stopped |
 
-The MCP tools (`agent`, `agent_control`, `memory`, `review`, `generate`, `analyze`)
-are also available directly; the commands are shortcuts with the routing rules
-baked in.
+The tools (`agent`, `agent_control`, `memory`, `review`, `generate`, `analyze`) are
+also available directly; the commands are shortcuts with the routing rules baked in.
 
 ## What it is good at
 
@@ -49,12 +48,30 @@ directly than to specify. DeepSeek output is input to Claude, not a verdict — 
 
 ## Memory
 
-Each project keeps its own state in `<project>/.agent/`: detected stack and quality
-rules, one file per chat thread (goal, state, decisions, next steps), and subagent
-transcripts. Nothing is shared between projects. `/deepseek-subagents:brief` at the
-start of a session replaces re-reading the codebase to remember where you stopped.
+Each project keeps its own state in `<project>/.agent/memory/`, as plain markdown you
+can read and diff:
 
-Commit `.agent/project.json` and `.agent/chats/`; `.agent/sessions/` is gitignored.
+- `FACTS.md` — what is true about this codebase, one claim per line with the
+  `file:line` that backs it
+- `RULES.md` — conventions this project holds you to
+- `chats/<id>.md` — one file per thread: goal, state, decisions, next steps
+- `ARCHIVE.md` — retired facts, kept recoverable
+- `sessions/<id>.txt` — raw transcripts, pruned after 14 days
+
+Nothing is shared between projects.
+
+**The store fills itself.** After every subagent run, a cheap DeepSeek pass pulls
+durable facts out of the answer and merges them with deterministic code — a repeat
+claim reinforces the existing one, a changed value supersedes it, and the model never
+rewrites the file wholesale. Facts that stop resolving to real code lose confidence
+and eventually retire to the archive.
+
+Retrieval is by relevance, not by dumping: `/deepseek-subagents:brief` and every
+subagent prompt inject only the facts that rank for the task at hand, so the store
+does not get more expensive as it gets more useful.
+
+Commit `.agent/memory/` if you want the project's knowledge to travel with the repo;
+the default `.gitignore` treats it as local state.
 
 ## Note while the v2 branch is open
 

@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 
-export type FixturePreset = 'node-ts' | 'python' | 'empty';
+export type FixturePreset = 'node-ts' | 'python' | 'monorepo' | 'empty';
 
 /**
  * A throwaway project directory. Agents get pointed at one of these instead of
@@ -70,6 +70,26 @@ app.get('/users/:name', async (req, res) => {
   python: {
     'pyproject.toml': '[project]\nname = "sandbox-api"\ndependencies = ["fastapi", "pytest"]\n',
     'app/main.py': 'from fastapi import FastAPI\n\napp = FastAPI()\n\n\n@app.get("/health")\ndef health():\n    return {"status": "ok"}\n',
+  },
+  // Mirrors the real shape that defeated the old root-only detector: every
+  // manifest lives one level down, so the root itself looks like nothing.
+  monorepo: {
+    'README.md': '# Monorepo fixture\n',
+    'dashboard/package.json': JSON.stringify(
+      {
+        name: 'dashboard',
+        type: 'module',
+        dependencies: { react: '^18.0.0' },
+        devDependencies: { vite: '^5.0.0', vitest: '^2.0.0' },
+      },
+      null,
+      2
+    ),
+    'dashboard/tsconfig.json': '{ "compilerOptions": { "strict": true } }',
+    'dashboard/package-lock.json': '{}',
+    'dashboard/src/config/env.ts': "export const BASE_URL = 'http://localhost:6777';\n",
+    'server/Api.csproj': '<Project Sdk="Microsoft.NET.Sdk.Web">\n  <ItemGroup>\n    <PackageReference Include="xunit" Version="2.9.0" />\n  </ItemGroup>\n</Project>\n',
+    'server/Program.cs': 'var builder = WebApplication.CreateBuilder(args);\nbuilder.WebHost.ConfigureKestrel(o => o.Listen(IPAddress.Any, 6777));\n',
   },
   empty: {
     'README.md': '# Empty sandbox\n',
