@@ -13,6 +13,8 @@ import {
   getOpenAIToolSchemas,
 } from './tools/workspaceTools.js';
 import { MemoryStore } from '../memory/MemoryStore.js';
+import { autoCaptureEnabled, compactTranscript, extractFacts } from '../memory/Curator.js';
+import { KEEP_VERBATIM_MESSAGES, shapeContext } from './context.js';
 import { ProviderRegistry } from '../providers/base/ProviderRegistry.js';
 import { config } from '../config/index.js';
 import { logger } from '../logging/logger.js';
@@ -94,7 +96,7 @@ export class SubagentManager {
   private lookupSession(store: MemoryStore, sessionId: string): SubagentSession | undefined {
     const cached = this.sessions.get(this.key(store.ref.root, sessionId));
     if (cached) return cached;
-    const persisted = store.loadSessionRecord<SubagentSession>(sessionId);
+    const persisted = store.loadSessionRecord(sessionId);
     if (persisted && persisted.projectRoot === store.ref.root) {
       this.sessions.set(this.key(store.ref.root, sessionId), persisted);
       return persisted;
@@ -104,7 +106,7 @@ export class SubagentManager {
 
   private persist(store: MemoryStore, session: SubagentSession): void {
     this.sessions.set(this.key(session.projectRoot, session.sessionId), session);
-    store.saveSessionRecord(session.sessionId, session);
+    store.saveSessionRecord(session);
   }
 
   public async run(options: SubagentRunOptions): Promise<SubagentRunResult> {
@@ -139,8 +141,9 @@ export class SubagentManager {
       const sessionId = options.sessionId || `${role}-${Date.now().toString(36)}`;
 
       // Project facts + chat brief are injected server-side, so the caller never
-      // has to resend them on follow-up turns.
-      const directive = store.projectDirective() + (chatId ? store.chatDirective(chatId) : '');
+      // has to resend them on follow-up turns. The task text selects which
+      // remembered facts come along, instead of dumping the whole store.
+      const directive = store.projectDirective(options.task) + (chatId ? store.chatDirective(chatId) : '');
       const systemPrompt = (options.systemPrompt || persona.prompt) + directive;
 
       session = {
@@ -198,7 +201,7 @@ export class SubagentManager {
       }
 
       try {
-        const response = await provider.chat(this.getFormattedMessages(session), {
+        const response = await provider.chat(await this.prepareMessages(session), {
           model,
           temperature: options.temperature ?? 0.2,
           tools: toolSchemas.length > 0 ? toolSchemas : undefined,
@@ -274,9 +277,40 @@ export class SubagentManager {
       }
     }
 
+    // Running out of steps used to return an empty placeholder, throwing away
+    // every token the run had already spent. Force one tool-free turn instead:
+    // the subagent must answer from what it gathered.
     if (stepsLeft === 0 && session.status === 'active') {
+      session.messages.push({
+        role: 'user',
+        content:
+          'You have no tool calls left. Answer the task now using only what you have already read. ' +
+          'State your findings with their file:line references, and say plainly which parts you could not verify.',
+        timestamp: Date.now(),
+      });
+
+      try {
+        const response = await provider.chat(await this.prepareMessages(session), {
+          model,
+          temperature: options.temperature ?? 0.2,
+        });
+        if (response.content) {
+          finalContent = response.content;
+          session.messages.push({ role: 'assistant', content: finalContent, timestamp: Date.now() });
+        }
+        if (response.usage) {
+          session.usage.promptTokens += response.usage.promptTokens || 0;
+          session.usage.completionTokens += response.usage.completionTokens || 0;
+          session.usage.totalTokens += response.usage.totalTokens || 0;
+        }
+      } catch (err: any) {
+        logger.warn(`[Subagent] Forced final answer failed for '${session.sessionId}': ${err.message}`);
+      }
+
       session.status = 'completed';
-      finalContent = finalContent || '[step limit reached before the subagent produced a final answer]';
+      finalContent =
+        finalContent ||
+        '[step limit reached and the forced final answer failed — re-run with a higher max_steps]';
     }
 
     const executionTimeMs = Date.now() - startTime;
@@ -295,6 +329,23 @@ export class SubagentManager {
       });
       if (toolCtx.touchedFiles.length > 0) {
         store.saveChat(chatId, { touchedFiles: toolCtx.touchedFiles });
+      }
+    }
+
+    // Turn the run into durable memory. Without this the project relearns the
+    // same facts on every session, which is what the delegation was meant to
+    // avoid. Capture never blocks or fails the run it is summarizing.
+    if (autoCaptureEnabled() && session.status === 'completed') {
+      try {
+        const candidates = await extractFacts({ task: options.task, answer: finalContent, role: String(role) });
+        if (candidates.length > 0) {
+          const merged = store.rememberFacts(candidates);
+          logger.info(
+            `[Memory] ${store.ref.name}: +${merged.added.length} new, ${merged.reinforced.length} reinforced, ${merged.superseded.length} superseded`
+          );
+        }
+      } catch (err: any) {
+        logger.warn(`[Memory] Auto-capture failed: ${err.message}`);
       }
     }
 
@@ -319,7 +370,7 @@ export class SubagentManager {
 
   public listSessions(projectRoot?: string, chatId?: string): SubagentSession[] {
     const store = MemoryStore.for(projectRoot);
-    const records = store.listSessionRecords<SubagentSession>();
+    const records = store.listSessionRecords();
     return chatId ? records.filter((s) => s.chatId === chatId) : records;
   }
 
@@ -338,13 +389,61 @@ export class SubagentManager {
     return true;
   }
 
-  private getFormattedMessages(session: SubagentSession): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
-    const systemMsg = session.messages.find((m) => m.role === 'system');
-    const recent = session.messages.filter((m) => m.role !== 'system').slice(-16);
+  /**
+   * Shape the session's history down to something that fits, then format it.
+   *
+   * Runs the cheap layers first — cap oversized tool results, then prune old
+   * ones — and only pays for a model-written handoff note if the arithmetic
+   * was not enough. The shaped history is written back to the session so the
+   * next turn starts from the reduced form instead of redoing the work.
+   */
+  private async prepareMessages(
+    session: SubagentSession
+  ): Promise<Array<{ role: 'system' | 'user' | 'assistant'; content: string }>> {
+    const budget = { contextWindow: config.deepseek.contextWindow };
+    const { messages, report } = shapeContext(session.messages, budget);
 
-    const result: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
-    if (systemMsg) result.push({ role: 'system', content: systemMsg.content });
-    for (const msg of recent) result.push({ role: msg.role, content: msg.content });
-    return result;
+    if (report.before !== report.after) {
+      session.messages = messages;
+      logger.info(
+        `[Context] ${session.sessionId}: ${report.before.toLocaleString()} -> ${report.after.toLocaleString()} tokens ` +
+          `(budget freed ${report.budgetFreed.toLocaleString()}, pruned ${report.pruneFreed.toLocaleString()})`
+      );
+    }
+
+    if (report.needsSummary) {
+      await this.foldOldTurns(session);
+    }
+
+    return session.messages.map((m) => ({ role: m.role, content: m.content }));
+  }
+
+  /**
+   * Fold everything outside the protected tail into a single handoff note.
+   *
+   * The system prompt and the most recent turns survive verbatim; only the
+   * middle is summarized, so repeated compaction does not erode what the agent
+   * is currently working on.
+   */
+  private async foldOldTurns(session: SubagentSession): Promise<void> {
+    const system = session.messages.filter((m) => m.role === 'system');
+    const rest = session.messages.filter((m) => m.role !== 'system');
+    const keep = rest.slice(-KEEP_VERBATIM_MESSAGES);
+    const older = rest.slice(0, rest.length - keep.length);
+    if (older.length === 0) return;
+
+    const { summary, foldedMessages } = await compactTranscript(older);
+    if (!summary) return;
+
+    session.messages = [
+      ...system,
+      {
+        role: 'user',
+        content: `[earlier context, compacted — ${foldedMessages} messages]\n\n${summary}`,
+        timestamp: Date.now(),
+      },
+      ...keep,
+    ];
+    logger.info(`[Context] ${session.sessionId}: folded ${foldedMessages} older message(s) into a handoff note`);
   }
 }

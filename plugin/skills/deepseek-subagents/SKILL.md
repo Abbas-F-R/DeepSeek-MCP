@@ -1,13 +1,13 @@
 ---
 name: deepseek-subagents
-description: Delegate engineering work to DeepSeek subagents that read and write the current project directly. Six tools (agent, agent_control, memory, review, generate, analyze) with per-project and per-chat memory, so a thread survives restarts and never leaks between projects.
+description: Delegate engineering work to DeepSeek subagents that read and write the current project directly. Six tools (agent, agent_control, memory, review, generate, analyze) over a self-filling markdown memory — facts about the codebase are captured after every run, so a thread survives restarts and never leaks between projects.
 ---
 
 # DeepSeek Subagents
 
-Claude Code stays the coordinator. Subagents run inside the MCP server with their own
-tools on the project's filesystem, so their intermediate steps never enter your context —
-only the final answer does.
+Claude Code stays the coordinator. Subagents run out of process with their own tools on
+the project's filesystem, so their intermediate steps never enter your context — only
+the final answer does.
 
 ## Contract
 
@@ -23,20 +23,32 @@ only the final answer does.
 ## Start of a chat
 
 ```
-memory { action: "brief" }                       -> stack, rules, active chat, where we stopped
+memory { action: "brief", query: "what you are about to work on" }
 memory { action: "chat_start", title: "...", goal: "..." }   -> chat-2026-08-05-a1b2
 ```
+`query` selects which remembered facts come back. Omit it and you get the project
+shape and the last thread, but none of the codebase facts — with a full store that
+is the difference between a brief and a dump.
+
+Mid-task, ask for what you need: `memory { action: "recall", query: "jwt expiry" }`.
 
 ## End of a work block — always
+
+Write it as a handoff to whoever resumes, not as a diary:
 
 ```
 memory { action: "chat_save", chat: "<id>",
          summary: "where we stand now",
+         constraints: ["..."],           // limits the work must respect
          next_steps: ["..."],            // replaces the list
          decisions: ["..."],             // appended
+         critical: ["..."],              // exact values not to guess again
          open_questions: ["..."] }       // appended
 ```
-`status: "done"` closes the thread. Without this call the next chat starts blind.
+`constraints` and `critical` are the two that get skipped and then missed: what
+may not break, and the exact ports, paths and signatures a resumed run would
+otherwise re-derive. `status: "done"` closes the thread. Without this call the
+next chat starts blind.
 
 ## Tools
 
@@ -44,7 +56,7 @@ memory { action: "chat_save", chat: "<id>",
 | :--- | :--- |
 | `agent` | Run a subagent. `role`: explore, scout, general, coder, security, sql, custom |
 | `agent_control` | `action`: list, status, stop, persona |
-| `memory` | `action`: brief, project, rule, set, rescan, chat_start, chat_save, chat_get, chat_list, projects |
+| `memory` | `action`: brief, recall, project, rule, rule_remove, set, rescan, remember, chat_start, chat_save, chat_get, chat_list, verify, compact, stats, projects |
 | `review` | `kind`: code, folder, project, sql, architecture, security, performance, refactor |
 | `generate` | `kind`: code, files, sql, tests, tests_inline, docs, project, seed — returns file blocks, writes nothing |
 | `analyze` | `kind`: explain, summarize, document, repo |
@@ -82,15 +94,46 @@ generate { kind: "files", spec: "Orders module: repository, service, DTOs, contr
 ## Cost notes
 
 - `verbose: true` returns the reasoning trace. Off by default because it is large.
-- `max_steps` (default 8) caps tool round trips inside a subagent.
+- `max_steps` (default 8) caps tool round trips inside a subagent. Running out no
+  longer wastes the run — the subagent is forced to answer from what it gathered.
+- A subagent's own history is shaped before every model call, cheapest layer first:
+  oversized tool results are capped, old ones are pruned to a reference, and only
+  if it is still over 85% of the window does a summary get written. Measured on a
+  run that read five large files: 37,007 to 15,007 tokens, same answer.
 - Response headers report time, tool calls and token usage per session; `agent_control
   { action: "list" }` shows the running total per project.
 
-## Memory layout
+## Memory
 
-`<project>/.agent/project.json` (stack + rules) · `chats/<id>.json` (threads) ·
-`sessions/<id>.json` (transcripts, gitignored). A machine-wide index at
-`~/.deepseek-mcp/projects.json` answers `memory { action: "projects" }`.
+Plain markdown under `<project>/.agent/memory/`, so it is readable, diffable, and
+travels with the repo:
+
+| File | Layer | Retrieval |
+| :--- | :--- | :--- |
+| `FACTS.md` | what is true about the code, one claim per line with `file:line` | ranked by relevance to your query |
+| `RULES.md` | how work is done here | always injected |
+| `chats/<id>.md` | what happened, thread by thread | newest first |
+| `ARCHIVE.md` | retired facts, kept recoverable | — |
+| `sessions/<id>.txt` | raw transcripts, pruned after 14 days | — |
+
+**It fills itself.** After every subagent run a cheap DeepSeek pass extracts durable
+facts and merges them deterministically — a repeat claim reinforces, a changed value
+supersedes, nothing already stored is overwritten by the model. Set
+`MEMORY_AUTOCAPTURE=0` to turn capture off.
+
+**Hand edits are caught.** Each fact stores a hash of its anchored lines. Edit that
+code yourself and the fact comes back marked `STALE: this code changed since` — the
+check runs automatically on whatever is about to be injected, so a claim about code
+you have since rewritten never arrives dressed as fact. Subagents cannot run anything,
+so **you** run the tests and feed failures back; never assume generated code works.
+
+Facts decay: `memory { action: "verify" }` re-checks every anchor against the working
+tree, weakens what no longer resolves and archives what falls below the floor.
+`memory { action: "compact" }` does that plus compressing overgrown threads and
+pruning transcripts. `memory { action: "stats" }` shows what is being held.
+
+A machine-wide index at `~/.deepseek-mcp/PROJECTS.md` answers
+`memory { action: "projects" }`.
 
 Legacy tool names (`subagent_coder`, `review_code`, `generate_files`, …) still work —
 they are aliased server-side and no longer listed, so they cost no schema tokens.

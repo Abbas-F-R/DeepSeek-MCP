@@ -148,9 +148,11 @@ function buildGenerationTask(
 /** Project facts (stack, rules) appended to generation specs so output fits the repo. */
 function projectSpecSuffix(args: any): string {
   try {
-    const p = MemoryStore.for(args.project_root).getProject();
+    const store = MemoryStore.for(args.project_root);
+    const p = store.getProject();
     const facts = [p.language, p.framework, p.architecture, p.namingConvention].filter(Boolean).join(', ');
-    const rules = p.rules.length ? `\nProject rules: ${p.rules.join('; ')}` : '';
+    const ruleList = store.getRules();
+    const rules = ruleList.length ? `\nProject rules: ${ruleList.map((r) => r.text).join('; ')}` : '';
     return facts || rules ? `\n\nProject conventions: ${facts}${rules}` : '';
   } catch {
     return '';
@@ -303,18 +305,45 @@ export const ALL_TOOLS: ToolDefinition[] = [
   {
     name: 'memory',
     description:
-      'Per-project and per-chat memory. Call action:"brief" at the start of a chat to learn the project stack, rules and where the last chat stopped. Use chat_start / chat_save to keep a thread of what was decided and what is next — state lives in <project>/.agent/ and survives restarts.',
+      'Per-project memory, stored as plain markdown in <project>/.agent/memory/ and surviving restarts. Three layers: facts about the codebase (ranked by relevance to your query), rules for how work is done here, and chat threads recording what was decided and what is next. Call action:"brief" with a query at the start of a thread; facts are captured automatically after every subagent run, so it fills itself.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['brief', 'project', 'rule', 'set', 'rescan', 'chat_start', 'chat_save', 'chat_get', 'chat_list', 'projects'],
+          enum: [
+            'brief',
+            'recall',
+            'project',
+            'rule',
+            'rule_remove',
+            'set',
+            'rescan',
+            'remember',
+            'chat_start',
+            'chat_save',
+            'chat_get',
+            'chat_list',
+            'verify',
+            'compact',
+            'stats',
+            'projects',
+          ],
           description:
-            'brief: project + active chat state | project: full project memory | rule: add a quality rule | set: update project fields | rescan: re-detect stack | chat_start: open a thread | chat_save: record progress | chat_get / chat_list | projects: all projects known on this machine',
+            'brief: stack, rules and where the last thread stopped | recall: the facts that rank for a query | project: stack and modules | rule / rule_remove: project conventions | set: update project fields | rescan: re-detect the stack | remember: store a fact by hand | chat_start / chat_save / chat_get / chat_list: thread state | verify: re-check every fact anchor against the working tree | compact: verify, compress overgrown threads, prune transcripts | stats: what memory holds | projects: every project on this machine',
         },
         ...WORKSPACE_PROPS,
         rule: { type: 'string', description: 'rule: the quality/architecture rule to store' },
+        id: { type: 'string', description: 'rule_remove: id of the rule to drop' },
+        query: { type: 'string', description: 'recall / brief: what you are about to work on, used to pick which facts come back' },
+        limit: { type: 'number', description: 'recall: how many facts to return (default 8)' },
+        fact: { type: 'string', description: 'remember: the claim to store, one sentence' },
+        anchors: { type: 'array', items: { type: 'string' }, description: 'remember: file:line references backing the fact' },
+        kind: {
+          type: 'string',
+          enum: ['stack', 'config', 'entrypoint', 'contract', 'convention', 'gotcha', 'security', 'decision', 'rule'],
+          description: 'remember / rule: what sort of entry this is',
+        },
         fields: {
           type: 'object',
           description: 'set: any of language, framework, architecture, codingStyle, namingConvention, testFramework',
@@ -322,6 +351,16 @@ export const ALL_TOOLS: ToolDefinition[] = [
         title: { type: 'string', description: 'chat_start: short thread title' },
         goal: { type: 'string', description: 'chat_start: what this chat is trying to achieve' },
         summary: { type: 'string', description: 'chat_save: where we stand right now' },
+        constraints: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'chat_save: limits the work must respect — versions, interfaces that may not break, instructions given',
+        },
+        critical: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'chat_save: exact values it would be wrong to guess again — paths, ports, names, signatures',
+        },
         next_steps: { type: 'array', items: { type: 'string' }, description: 'chat_save: replaces the current next-step list' },
         decisions: { type: 'array', items: { type: 'string' }, description: 'chat_save: decisions to append' },
         open_questions: { type: 'array', items: { type: 'string' }, description: 'chat_save: open questions to append' },
@@ -335,22 +374,53 @@ export const ALL_TOOLS: ToolDefinition[] = [
       const project = store.getProject();
 
       switch (args.action) {
-        case 'brief': {
-          const chatId = args.chat || store.getActiveChatId();
-          const chats = store.listChats(5);
-          const recent = chats.length
-            ? `\nRecent chats:\n${chats.map((c) => `- ${c.chatId} [${c.status}] ${c.title}${c.summary ? ` — ${c.summary.slice(0, 120)}` : ''}`).join('\n')}`
-            : `\nNo chat threads yet. Call memory{action:"chat_start", title:"..."} to open one.`;
-          return `${store.projectDirective()}${chatId ? store.chatDirective(chatId) : ''}${recent}`;
+        case 'brief':
+          return store.brief(args.query);
+
+        case 'recall': {
+          if (!args.query) return 'Error: "query" is required for action "recall".';
+          const hits = store.recallFacts(args.query, args.limit || 8);
+          if (!hits.length) return `Nothing remembered yet that matches "${args.query}".`;
+          return hits
+            .map(({ item }) => {
+              const anchors = item.anchors.length ? ` [${item.anchors.join(', ')}]` : '';
+              return `- ${item.text}${anchors} (${item.kind}, confidence ${item.confidence.toFixed(2)})`;
+            })
+            .join('\n');
         }
 
-        case 'project':
-          return JSON.stringify(project, null, 2);
+        case 'project': {
+          const modules = project.modules.length
+            ? project.modules
+                .map((m) => `- ${m.dir} — ${[m.language, m.framework, m.packageManager, m.testFramework].filter(Boolean).join(' · ')}`)
+                .join('\n')
+            : '- (no recognisable module manifests)';
+          const summary = [project.language, project.framework, project.packageManager, project.testFramework]
+            .filter(Boolean)
+            .join(' | ');
+          return `${project.name} — ${project.root}\n${summary}\nscanned ${project.lastScan}\n\nModules:\n${modules}`;
+        }
+
+        case 'remember': {
+          if (!args.fact) return 'Error: "fact" is required for action "remember".';
+          const report = store.rememberFacts([{ text: args.fact, anchors: args.anchors, kind: args.kind }]);
+          if (report.rejected.length) return `Rejected: ${report.rejected[0].reason}.`;
+          if (report.reinforced.length) return `Already known — reinforced [${report.reinforced[0].id}].`;
+          if (report.superseded.length) {
+            return `Stored [${report.superseded[0].by.id}], superseding [${report.superseded[0].old.id}].`;
+          }
+          return `Stored fact [${report.added[0]?.id}].`;
+        }
 
         case 'rule': {
           if (!args.rule) return 'Error: "rule" is required for action "rule".';
-          store.addRule(args.rule);
-          return `Stored project rule: "${args.rule}" (${project.rules.length} rules total).`;
+          const entry = store.addRule(args.rule, args.kind);
+          return `Stored rule [${entry?.id}]: "${args.rule}" (${store.getRules().length} rules total).`;
+        }
+
+        case 'rule_remove': {
+          if (!args.id) return 'Error: "id" is required for action "rule_remove".';
+          return store.removeRule(args.id) ? `Removed rule [${args.id}].` : `No rule with id '${args.id}'.`;
         }
 
         case 'set': {
@@ -374,6 +444,8 @@ export const ALL_TOOLS: ToolDefinition[] = [
           if (!chatId) return 'Error: no chat thread open. Call memory{action:"chat_start"} first.';
           const chat = store.saveChat(chatId, {
             summary: args.summary,
+            constraints: args.constraints,
+            critical: args.critical,
             nextSteps: args.next_steps,
             decisions: args.decisions,
             openQuestions: args.open_questions,
@@ -396,6 +468,39 @@ export const ALL_TOOLS: ToolDefinition[] = [
           return chats
             .map((c) => `${c.chatId} [${c.status}] ${c.title} · updated ${c.updatedAt}${c.summary ? `\n   ${c.summary.slice(0, 160)}` : ''}`)
             .join('\n');
+        }
+
+        case 'verify': {
+          const report = store.verifyFacts();
+          const lines = [
+            `Checked ${report.checked} anchored fact(s): ${report.ok} intact, ${report.changed.length} now point at edited code, ${report.weakened.length} weakened, ${report.archived.length} archived.`,
+          ];
+          for (const entry of report.changed) {
+            lines.push(`  STALE  ${entry.text.slice(0, 70)} [${entry.anchors.join(', ')}]`);
+          }
+          for (const entry of report.archived) {
+            lines.push(`  GONE   ${entry.text.slice(0, 70)}`);
+          }
+          return lines.join('\n');
+        }
+
+        case 'compact':
+          return store.compact();
+
+        case 'stats': {
+          const s = store.stats();
+          const kinds = Object.entries(s.factsByKind)
+            .sort((a, b) => b[1] - a[1])
+            .map(([kind, count]) => `${kind} ${count}`)
+            .join(', ');
+          return [
+            `${project.name} memory`,
+            `facts: ${s.facts} (${kinds || 'none'}) · average confidence ${s.averageConfidence}`,
+            `rules: ${s.rules}`,
+            `threads: ${s.chats} (${s.activeChats} active)`,
+            `session transcripts: ${s.sessions}`,
+            `on disk: ${(s.bytesOnDisk / 1024).toFixed(1)} KB`,
+          ].join('\n');
         }
 
         case 'projects': {
