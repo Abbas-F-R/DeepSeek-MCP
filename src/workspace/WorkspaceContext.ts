@@ -6,9 +6,8 @@ import { logger } from '../logging/logger.js';
 
 /**
  * Every request that touches the filesystem must be bound to an explicit
- * project root. The server process may be shared by many projects (SSE mode)
- * or spawned once per project (stdio mode), so `process.cwd()` alone is never
- * a safe answer.
+ * project root. The backend is spawned once per project, but a tool call may
+ * still name a different one, so `process.cwd()` alone is never a safe answer.
  */
 export interface WorkspaceRef {
   /** Absolute, real (symlink-resolved) project root */

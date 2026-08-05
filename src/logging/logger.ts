@@ -39,7 +39,7 @@ export const logger = winston.createLogger({
     winston.format.splat(),
     winston.format.json()
   ),
-  defaultMeta: { service: 'ai-orchestrator-mcp' },
+  defaultMeta: { service: 'deepseek-subagents' },
   transports: [
     // File transports only when a writable directory was found; stderr always works.
     ...(logDir

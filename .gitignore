@@ -4,4 +4,8 @@ logs/
 .env
 *.log
 
-.agent/sessions/
+# Agent memory is per-checkout state, not source.
+.agent/
+
+# A local .mcp.json for developing against this checkout (machine-specific, never committed).
+.mcp.json
