@@ -2,6 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import { logger } from '../../logging/logger.js';
 import { relativeToRoot, safeResolve } from '../../workspace/WorkspaceContext.js';
+import {
+  MAX_READ_BYTES,
+  MAX_SEARCH_BYTES,
+  isIgnored,
+  isSecret,
+  loadIgnoreRules,
+  secretRefusal,
+} from './ignore.js';
 
 export type SubagentToolName =
   | 'read_file'
@@ -27,7 +35,6 @@ export interface WorkspaceToolDefinition {
 
 const MAX_FILE_CHARS = 80_000;
 const MAX_SEARCH_HITS = 60;
-const IGNORED_DIRS = new Set(['node_modules', 'dist', 'build', 'out', '.git', '.next', 'vendor', 'target', '__pycache__', 'bin', 'obj']);
 const BINARY_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.zip', '.gz', '.tar',
   '.mp4', '.mp3', '.woff', '.woff2', '.ttf', '.eot', '.class', '.dll', '.exe', '.so', '.dylib',
@@ -36,6 +43,23 @@ const BINARY_EXTENSIONS = new Set([
 function track(ctx: WorkspaceToolContext, filePath: string): void {
   const rel = relativeToRoot(ctx.root, filePath);
   if (!ctx.touchedFiles.includes(rel)) ctx.touchedFiles.push(rel);
+}
+
+/**
+ * Resolve a caller-supplied path and refuse it if it names a credential file.
+ *
+ * Every tool goes through this, reads and writes alike: a subagent must not be
+ * able to post your keys to a model provider, and it must not be able to
+ * rewrite the file they live in either.
+ */
+function resolveSafePath(ctx: WorkspaceToolContext, target: string): { filePath: string; refusal?: string } {
+  const filePath = safeResolve(ctx.root, target);
+  const relative = relativeToRoot(ctx.root, filePath);
+  if (isSecret(relative)) {
+    logger.warn(`[WorkspaceTool] Refused credential path '${relative}'`);
+    return { filePath, refusal: secretRefusal(relative) };
+  }
+  return { filePath };
 }
 
 export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> = {
@@ -51,9 +75,21 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
     },
     execute: async (args: { path: string }, ctx) => {
       try {
-        const filePath = safeResolve(ctx.root, args.path);
+        const { filePath, refusal } = resolveSafePath(ctx, args.path);
+        if (refusal) return refusal;
         if (!fs.existsSync(filePath)) return `Error: file not found: '${args.path}'`;
-        if (fs.statSync(filePath).isDirectory()) return `Error: '${args.path}' is a directory. Use list_directory.`;
+
+        const stat = fs.statSync(filePath);
+        if (stat.isDirectory()) return `Error: '${args.path}' is a directory. Use list_directory.`;
+
+        // Checked before reading, not after: the old code pulled the whole file
+        // into memory and only then truncated it.
+        if (stat.size > MAX_READ_BYTES) {
+          return (
+            `Error: '${args.path}' is ${(stat.size / 1_000_000).toFixed(1)} MB, past the ${MAX_READ_BYTES / 1_000_000} MB read limit. ` +
+            `Use search_files to find the part you need.`
+          );
+        }
 
         let content = fs.readFileSync(filePath, 'utf-8');
         if (content.length > MAX_FILE_CHARS) {
@@ -80,7 +116,8 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
     },
     execute: async (args: { path: string; content: string }, ctx) => {
       try {
-        const filePath = safeResolve(ctx.root, args.path);
+        const { filePath, refusal } = resolveSafePath(ctx, args.path);
+        if (refusal) return refusal;
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         const existed = fs.existsSync(filePath);
         fs.writeFileSync(filePath, args.content, 'utf-8');
@@ -107,7 +144,8 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
     },
     execute: async (args: { path: string; target: string; replacement: string }, ctx) => {
       try {
-        const filePath = safeResolve(ctx.root, args.path);
+        const { filePath, refusal } = resolveSafePath(ctx, args.path);
+        if (refusal) return refusal;
         if (!fs.existsSync(filePath)) return `Error: file not found: '${args.path}'`;
 
         const original = fs.readFileSync(filePath, 'utf-8');
@@ -137,7 +175,8 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
     },
     execute: async (args: { path: string }, ctx) => {
       try {
-        const filePath = safeResolve(ctx.root, args.path);
+        const { filePath, refusal } = resolveSafePath(ctx, args.path);
+        if (refusal) return refusal;
         if (!fs.existsSync(filePath)) return `Error: file not found: '${args.path}'`;
         if (fs.statSync(filePath).isDirectory()) return `Error: '${args.path}' is a directory. Directory deletion is not permitted.`;
         fs.unlinkSync(filePath);
@@ -157,7 +196,7 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Directory path relative to the project root (default ".")' },
-        recursive: { type: 'boolean', description: 'List nested files too (depth 3, build dirs skipped)' },
+        recursive: { type: 'boolean', description: 'List nested files too (depth 3, ignored paths skipped)' },
       },
     },
     execute: async (args: { path?: string; recursive?: boolean }, ctx) => {
@@ -165,13 +204,18 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
         const dirPath = safeResolve(ctx.root, args.path);
         if (!fs.existsSync(dirPath)) return `Error: directory not found: '${args.path || '.'}'`;
 
+        const rules = loadIgnoreRules(ctx.root);
         const lines: string[] = [];
         const walk = (dir: string, depth: number) => {
           const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
           for (const entry of entries) {
-            if (IGNORED_DIRS.has(entry.name)) continue;
             const full = path.join(dir, entry.name);
-            lines.push(`${entry.isDirectory() ? 'dir  ' : 'file '} ${relativeToRoot(ctx.root, full)}`);
+            const relative = relativeToRoot(ctx.root, full);
+            if (isIgnored(rules, relative, entry.isDirectory())) continue;
+            // Credential files are not even listed: their names alone tell a
+            // subagent what to go looking for.
+            if (isSecret(relative)) continue;
+            lines.push(`${entry.isDirectory() ? 'dir  ' : 'file '} ${relative}`);
             if (entry.isDirectory() && args.recursive && depth < 3) walk(full, depth + 1);
           }
         };
@@ -217,6 +261,7 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
           matcher = (line) => line.toLowerCase().includes(needle);
         }
 
+        const rules = loadIgnoreRules(ctx.root);
         const hits: string[] = [];
         const walk = (dir: string) => {
           if (hits.length >= MAX_SEARCH_HITS) return;
@@ -228,8 +273,11 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
           }
           for (const entry of entries) {
             if (hits.length >= MAX_SEARCH_HITS) return;
-            if (entry.name.startsWith('.') || IGNORED_DIRS.has(entry.name)) continue;
             const full = path.join(dir, entry.name);
+            const relative = relativeToRoot(ctx.root, full);
+            // Dot-directories used to be skipped wholesale, which hid .github,
+            // .claude and friends. Only the ignore rules decide now.
+            if (isIgnored(rules, relative, entry.isDirectory()) || isSecret(relative)) continue;
             if (entry.isDirectory()) {
               walk(full);
               continue;
@@ -237,6 +285,13 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
             if (!entry.isFile()) continue;
             if (BINARY_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
             if (args.file_glob && !entry.name.endsWith(args.file_glob.replace(/^\*/, ''))) continue;
+
+            // Grepping a huge file costs far more than any match it could return.
+            try {
+              if (fs.statSync(full).size > MAX_SEARCH_BYTES) continue;
+            } catch {
+              continue;
+            }
 
             let content: string;
             try {

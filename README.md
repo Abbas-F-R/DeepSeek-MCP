@@ -115,6 +115,31 @@ against a throwaway fixture project in `$TMPDIR`, never a real repo. To run one:
 node --import tsx --test --test-name-pattern="@coder writes" tests/live/agents.test.ts
 ```
 
+## What subagents cannot see
+
+Anything a subagent reads is sent verbatim to a model provider, so the boundary is
+enforced in the tools rather than left to the prompt.
+
+**Credential files are refused by every tool**, reads and writes alike — `.env*`,
+`*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, cloud credentials, `secrets.*`,
+`terraform.tfstate`. This is not configurable. `list_directory` will not even name them.
+Templates like `.env.example` and `*.pub` stay readable.
+
+**Ignored paths** are skipped when walking the tree: build output, dependencies and
+caches by default, plus everything in `.gitignore` and `.agentignore`. Both use
+gitignore syntax, including `**`, character classes and `!` negation:
+
+```gitignore
+# .agentignore — keep the agent out of things that are big or irrelevant
+fixtures/**
+*.generated.ts
+!src/keep.generated.ts
+```
+
+Dot-directories such as `.github` and `.claude` **are** searchable — only the ignore
+rules decide. Reads over 2 MB are refused with a pointer to `search_files`, and files
+over 1 MB are skipped while searching.
+
 ## Context pipeline
 
 A subagent's own history is shaped before every model call, cheapest layer first — the
