@@ -1,13 +1,35 @@
 {
   "name": "ai-orchestrator-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Production Ready AI Orchestrator MCP Server integrating DeepSeek and future LLM providers with Claude Code",
   "main": "dist/index.js",
   "type": "module",
+  "bin": {
+    "deepseek-subagents": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "prompts",
+    "SKILL.md",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Abbas-F-R/DeepSeek-MCP.git"
+  },
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "prepare": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "start:sse": "npm run build && node dist/index.js --sse",
+    "start:see": "npm run build && node dist/index.js --sse",
+    "install:project": "npm run build && node dist/index.js --install",
+    "dev": "tsx src/index.ts",
+    "test": "npm run build && npm run test:unit && npm run test:integration",
+    "test:unit": "node --import tsx --test tests/unit/*.test.ts",
+    "test:integration": "node --import tsx --test tests/integration/*.test.ts",
+    "test:live": "npm run build && node --import tsx --test tests/live/*.test.ts"
   },
   "keywords": [
     "mcp",
@@ -21,11 +43,13 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.0",
     "dotenv": "^16.4.7",
+    "express": "^5.2.1",
     "openai": "^4.86.0",
     "winston": "^3.17.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^22.13.5",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"
