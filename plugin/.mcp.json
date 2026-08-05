@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "deepseek": {
+      "command": "npx",
+      "args": ["-y", "github:Abbas-F-R/DeepSeek-MCP#moamal/refactoring/v2"],
+      "env": {
+        "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}",
+        "PROJECT_ROOT": "${CLAUDE_PROJECT_DIR}"
+      }
+    }
+  }
+}

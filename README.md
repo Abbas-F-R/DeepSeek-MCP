@@ -18,7 +18,19 @@ and writing inside the server, so only their final answer enters Claude's contex
 - **Context injected server-side.** Project facts and the chat brief are added to each
   subagent's system prompt automatically — the caller never resends them.
 
-## Install
+## Install as a Claude Code plugin (recommended)
+
+```
+/plugin marketplace add Abbas-F-R/DeepSeek-MCP
+/plugin install deepseek-subagents@deepseek-subagents
+```
+
+One install, every project — no `.mcp.json` per repo. Ships the MCP server, the
+skill, and six commands (`/deepseek-subagents:brief`, `delegate`, `generate`,
+`review`, `explore`, `save`). Put `DEEPSEEK_API_KEY` in your shell profile. See
+[plugin/README.md](plugin/README.md).
+
+## Install as a standalone server
 
 ```bash
 npm install
