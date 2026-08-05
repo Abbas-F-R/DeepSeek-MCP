@@ -1,0 +1,15 @@
+{
+  "name": "deepseek-subagents",
+  "description": "DeepSeek-powered subagents for Claude Code: delegate bounded coding sub-tasks to a cheaper model without spending Claude context on them.",
+  "owner": {
+    "name": "Moamal Hussin"
+  },
+  "plugins": [
+    {
+      "name": "deepseek-subagents",
+      "source": "./plugin",
+      "version": "1.1.0",
+      "description": "Delegate bounded coding sub-tasks to DeepSeek subagents that read and write the project directly."
+    }
+  ]
+}
