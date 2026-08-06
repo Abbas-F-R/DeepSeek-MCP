@@ -1,4 +1,4 @@
-import { SubagentToolName } from './tools/workspaceTools.js';
+import { OrchestrationContext, SubagentToolName } from './tools/workspaceTools.js';
 
 export type SubagentRole =
   | 'explore'   // Codebase exploration, file discovery, symbol search
@@ -62,6 +62,10 @@ export interface SubagentRunOptions {
   providerId?: string;
   /** Max tool-use round trips before the subagent must answer. Default 8. */
   maxSteps?: number;
+  /** Cancels the run, including the model call it is waiting on. */
+  signal?: AbortSignal;
+  /** Set when this run is a task of an orchestrated plan. */
+  orchestration?: OrchestrationContext;
 }
 
 export interface SubagentRunResult {

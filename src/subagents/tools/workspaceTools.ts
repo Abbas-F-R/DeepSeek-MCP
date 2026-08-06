@@ -11,6 +11,7 @@ import {
   globToRegExp,
   secretRefusal,
 } from './ignore.js';
+import { claimFile, claimRefusal } from '../../orchestrator/claims.js';
 
 export type SubagentToolName =
   | 'read_file'
@@ -18,13 +19,48 @@ export type SubagentToolName =
   | 'edit_file'
   | 'delete_file'
   | 'list_directory'
-  | 'search_files';
+  | 'search_files'
+  | 'spawn_agent';
+
+/** What a running subagent asks for when it delegates part of its own work. */
+export interface SpawnRequest {
+  role?: string;
+  task: string;
+  context?: string;
+  maxSteps?: number;
+  allowedTools?: SubagentToolName[];
+}
+
+export interface SpawnOutcome {
+  taskId: string;
+  content: string;
+  sessionId: string;
+  tokens: number;
+  touchedFiles: string[];
+}
+
+/**
+ * Present only when a subagent is executing as part of a run.
+ *
+ * It is what turns a lone subagent into a node of a graph: it identifies the
+ * task for file claims, and carries the callback that lets the task delegate.
+ * A plain `agent` call has none of this and behaves exactly as before.
+ */
+export interface OrchestrationContext {
+  runId: string;
+  taskId: string;
+  depth: number;
+  allowSpawn: boolean;
+  maxDepth: number;
+  spawn: (request: SpawnRequest) => Promise<SpawnOutcome>;
+}
 
 /** Everything a workspace tool needs to stay inside the right project. */
 export interface WorkspaceToolContext {
   root: string;
   /** Files written or edited during the run, relative to root. */
   touchedFiles: string[];
+  orchestration?: OrchestrationContext;
 }
 
 export interface WorkspaceToolDefinition {
@@ -75,6 +111,44 @@ function resolveSafePath(ctx: WorkspaceToolContext, target: string): { filePath:
     return { filePath, refusal: secretRefusal(relative) };
   }
   return { filePath };
+}
+
+/**
+ * Take ownership of a file before changing it, when running inside a run.
+ *
+ * Parallel tasks writing the same file is the one way this plugin can silently
+ * destroy work: the loser's edit vanishes with no error. Claiming turns that
+ * into a refusal the model can read and route around.
+ */
+function claimGuard(ctx: WorkspaceToolContext, filePath: string): string | undefined {
+  if (!ctx.orchestration) return undefined;
+  const relative = relativeToRoot(ctx.root, filePath);
+  const claim = claimFile(relative, { runId: ctx.orchestration.runId, taskId: ctx.orchestration.taskId });
+  if (claim.ok) return undefined;
+  logger.warn(`[WorkspaceTool] '${relative}' is claimed by ${claim.heldBy.taskId}`);
+  return claimRefusal(relative, claim.heldBy);
+}
+
+/**
+ * Write through a temporary file and rename over the target.
+ *
+ * `rename` is atomic within a filesystem, so a reader — including a parallel
+ * subagent — sees either the old file or the new one, never a half-written
+ * one, and a crash mid-write cannot truncate source code.
+ */
+function writeAtomic(filePath: string, content: string): void {
+  const temp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    fs.writeFileSync(temp, content, 'utf-8');
+    fs.renameSync(temp, filePath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(temp)) fs.unlinkSync(temp);
+    } catch {
+      /* the original error is the one worth reporting */
+    }
+    throw err;
+  }
 }
 
 export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> = {
@@ -168,9 +242,11 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
       try {
         const { filePath, refusal } = resolveSafePath(ctx, args.path);
         if (refusal) return refusal;
+        const claimed = claimGuard(ctx, filePath);
+        if (claimed) return claimed;
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         const existed = fs.existsSync(filePath);
-        fs.writeFileSync(filePath, args.content, 'utf-8');
+        writeAtomic(filePath, args.content);
         track(ctx, filePath);
         logger.info(`[WorkspaceTool] write_file '${relativeToRoot(ctx.root, filePath)}' (${args.content.length} bytes)`);
         return `${existed ? 'Overwrote' : 'Created'} '${relativeToRoot(ctx.root, filePath)}' (${args.content.length} bytes)`;
@@ -198,13 +274,15 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
         const { filePath, refusal } = resolveSafePath(ctx, args.path);
         if (refusal) return refusal;
         if (!fs.existsSync(filePath)) return `Error: file not found: '${args.path}'`;
+        const claimed = claimGuard(ctx, filePath);
+        if (claimed) return claimed;
 
         const original = fs.readFileSync(filePath, 'utf-8');
         const occurrences = original.split(args.target).length - 1;
         if (occurrences === 0) return `Error: target text not found in '${args.path}'. Read the file first and match exactly.`;
         if (occurrences > 1) return `Error: target text appears ${occurrences} times in '${args.path}'. Include more surrounding context so it is unique.`;
 
-        fs.writeFileSync(filePath, original.replace(args.target, args.replacement), 'utf-8');
+        writeAtomic(filePath, original.replace(args.target, args.replacement));
         track(ctx, filePath);
         logger.info(`[WorkspaceTool] edit_file '${relativeToRoot(ctx.root, filePath)}'`);
         return `Updated '${relativeToRoot(ctx.root, filePath)}'`;
@@ -230,6 +308,8 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
         if (refusal) return refusal;
         if (!fs.existsSync(filePath)) return `Error: file not found: '${args.path}'`;
         if (fs.statSync(filePath).isDirectory()) return `Error: '${args.path}' is a directory. Directory deletion is not permitted.`;
+        const claimed = claimGuard(ctx, filePath);
+        if (claimed) return claimed;
         fs.unlinkSync(filePath);
         track(ctx, filePath);
         logger.info(`[WorkspaceTool] delete_file '${relativeToRoot(ctx.root, filePath)}'`);
@@ -391,6 +471,57 @@ export const WORKSPACE_TOOLS: Record<SubagentToolName, WorkspaceToolDefinition> 
         return `${hits.join('\n')}${capped}`;
       } catch (err: any) {
         return `Error searching: ${err.message}`;
+      }
+    },
+  },
+
+  spawn_agent: {
+    name: 'spawn_agent',
+    description:
+      'Delegate one self-contained piece of your task to another subagent and wait for its answer. Use it when a step needs different permissions than you hold (a read-only role needing code written) or when it is large enough to be worth its own context. Only the delegate\'s final answer comes back to you, not its file reads. Give it everything it needs in one shot — it cannot ask you questions. Roles: explore, scout, general, coder, security, sql.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The complete, self-contained task for the delegate' },
+        role: {
+          type: 'string',
+          enum: ['explore', 'scout', 'general', 'coder', 'security', 'sql'],
+          description: 'Which kind of subagent to delegate to (default: general)',
+        },
+        context: { type: 'string', description: 'Facts the delegate needs that are not on disk' },
+        max_steps: { type: 'number', description: 'Tool round trips the delegate may take (default 8)' },
+      },
+      required: ['task'],
+    },
+    execute: async (args: { task: string; role?: string; context?: string; max_steps?: number }, ctx) => {
+      const orchestration = ctx.orchestration;
+      if (!orchestration) {
+        return 'Error: delegation is only available to a task running inside an orchestrated run.';
+      }
+      if (!orchestration.allowSpawn) {
+        return (
+          `Error: this task may not delegate. ` +
+          (orchestration.depth >= orchestration.maxDepth
+            ? `Delegation depth ${orchestration.maxDepth} is already reached.`
+            : `Its plan entry did not set allowSpawn.`) +
+          ` Do the work yourself, or report what still needs doing.`
+        );
+      }
+      if (!args.task || !args.task.trim()) return 'Error: "task" is required — say exactly what the delegate must do.';
+
+      try {
+        const outcome = await orchestration.spawn({
+          role: args.role,
+          task: args.task,
+          context: args.context,
+          maxSteps: args.max_steps,
+        });
+        // Its touched files are reported back so the parent knows what changed
+        // underneath it without having to go looking.
+        const files = outcome.touchedFiles.length ? `\nfiles: ${outcome.touchedFiles.join(', ')}` : '';
+        return `[${outcome.taskId} · ${args.role || 'general'} · ${outcome.tokens} tok]${files}\n${outcome.content}`;
+      } catch (err: any) {
+        return `Error: delegation failed: ${err.message}. Continue without it, and say in your answer what could not be delegated.`;
       }
     },
   },

@@ -7,6 +7,7 @@ import { initializeProviders } from '../providers/index.js';
 import { logger } from '../logging/logger.js';
 import { VERSION, validateConfig } from '../config/index.js';
 import { resolveWorkspace } from '../workspace/WorkspaceContext.js';
+import { Orchestrator } from '../orchestrator/Orchestrator.js';
 
 /**
  * The plugin's tool backend.
@@ -73,9 +74,41 @@ export class SubagentServer {
     return server;
   }
 
+  /**
+   * Stop the moment the host does.
+   *
+   * A run keeps executing after the request that started it returns, which is
+   * the point — but it means the process can be holding live subagents when the
+   * chat closes. Every way that can happen ends here: stdin EOF is the normal
+   * one (the host closed the pipe), the signals cover a killed process.
+   *
+   * The handler is synchronous and idempotent, because anything deferred to a
+   * microtask may never run once the event loop is being torn down.
+   */
+  private installShutdownHooks(): void {
+    const orchestrator = Orchestrator.getInstance();
+    let done = false;
+
+    const shutdown = (reason: string, exit: boolean) => {
+      if (done) return;
+      done = true;
+      orchestrator.shutdown(reason);
+      if (exit) process.exit(0);
+    };
+
+    process.stdin.on('end', () => shutdown('the host closed the connection', true));
+    process.stdin.on('close', () => shutdown('the host closed the connection', true));
+    process.on('SIGINT', () => shutdown('interrupted', true));
+    process.on('SIGTERM', () => shutdown('terminated', true));
+    // Flushing run files is the last useful thing this process can do, so it
+    // happens even on an orderly exit.
+    process.on('beforeExit', () => shutdown('the process is exiting', false));
+  }
+
   public async start(): Promise<void> {
     const workspace = resolveWorkspace();
     const server = this.createServer(workspace.root);
+    this.installShutdownHooks();
     await server.connect(new StdioServerTransport());
     logger.info(`DeepSeek Subagents ${VERSION} started · project root: ${workspace.root}`);
   }

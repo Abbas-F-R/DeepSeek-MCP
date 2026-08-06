@@ -9,6 +9,10 @@ import { SubagentManager } from '../subagents/SubagentManager.js';
 import { SubagentRole } from '../subagents/types.js';
 import { MemoryStore } from '../memory/MemoryStore.js';
 import { safeResolve, relativeToRoot } from '../workspace/WorkspaceContext.js';
+import { Orchestrator, MAX_WAIT_MS } from '../orchestrator/Orchestrator.js';
+import { MAX_PLAN_TASKS } from '../orchestrator/plan.js';
+import { renderBoard, renderResults, renderTask } from '../orchestrator/format.js';
+import { Run } from '../orchestrator/types.js';
 
 export interface ToolDefinition {
   name: string;
@@ -196,6 +200,124 @@ async function handleAgent(args: any): Promise<string> {
   return `${head}${files}\n\n${result.content}${reasoning}`;
 }
 
+// ----------------------------------------------------------- 2. orchestrate
+
+/**
+ * Find the run a call means when it does not say.
+ *
+ * Almost every call in a session concerns the run that session started, and
+ * making the coordinator carry the id through every turn is a tax on the thing
+ * it does most. An explicit id always wins.
+ */
+function resolveRun(args: any): Run {
+  const orchestrator = Orchestrator.getInstance();
+
+  if (args.run) {
+    const run = orchestrator.get(args.run, args.project_root);
+    if (!run) throw new Error(`No run '${args.run}' recorded for this project.`);
+    return run;
+  }
+
+  const runs = orchestrator.list(args.project_root, 10);
+  if (runs.length === 0) throw new Error('No runs recorded for this project. Start one with action:"start".');
+  const live = runs.find((r) => r.status === 'running' || r.status === 'waiting' || r.status === 'interrupted');
+  return live || runs[0];
+}
+
+/**
+ * Accept a plan written in either casing.
+ *
+ * The schema advertises snake_case for the fields that have it elsewhere in
+ * this tool surface, but a model writing a plan reaches for whichever it saw
+ * last. Rejecting `allow_spawn` because the schema said `allowSpawn` would be
+ * a validation error over nothing.
+ */
+function normalizePlan(plan: any): any {
+  if (!plan || !Array.isArray(plan.tasks)) return plan;
+  return {
+    ...plan,
+    tasks: plan.tasks.map((task: any) => {
+      if (!task || typeof task !== 'object') return task;
+      const { max_steps, allow_spawn, on_fail, allowed_tools, ...rest } = task;
+      return {
+        ...rest,
+        maxSteps: task.maxSteps ?? max_steps,
+        allowSpawn: task.allowSpawn ?? allow_spawn,
+        onFail: task.onFail ?? on_fail,
+        allowedTools: task.allowedTools ?? allowed_tools,
+      };
+    }),
+  };
+}
+
+async function handleOrchestrate(args: any): Promise<string> {
+  const orchestrator = Orchestrator.getInstance();
+
+  switch (args.action) {
+    case 'start': {
+      const plan = normalizePlan(args.plan);
+      if (!plan) return 'Error: "plan" is required for action "start".';
+      const run = orchestrator.start({
+        plan: { goal: args.goal || plan.goal, tasks: plan.tasks },
+        projectRoot: args.project_root,
+        chatId: args.chat,
+        maxParallel: args.max_parallel,
+      });
+      return `${renderBoard(run)}\n\nThe run is executing in the background; this call did not wait for it.`;
+    }
+
+    case 'status':
+      return renderBoard(resolveRun(args));
+
+    case 'wait': {
+      const run = resolveRun(args);
+      const settled = await orchestrator.wait(run.runId, args.timeout_ms || 120_000, args.project_root);
+      return renderBoard(settled);
+    }
+
+    case 'approve': {
+      if (!args.task) return 'Error: "task" is required for action "approve".';
+      const run = resolveRun(args);
+      orchestrator.approve(run.runId, args.task, args.note, args.project_root);
+      return renderBoard(run);
+    }
+
+    case 'reject': {
+      if (!args.task) return 'Error: "task" is required for action "reject".';
+      const run = resolveRun(args);
+      orchestrator.reject(run.runId, args.task, args.note, args.project_root);
+      return renderBoard(run);
+    }
+
+    case 'stop':
+      return renderBoard(orchestrator.stop(resolveRun(args).runId, args.project_root));
+
+    case 'resume':
+      return renderBoard(orchestrator.resume(resolveRun(args).runId, args.project_root));
+
+    case 'show': {
+      const run = resolveRun(args);
+      if (!args.task) return `${renderBoard(run)}\n\nAnswers so far:\n${renderResults(run)}`;
+      const task = run.tasks.find((t) => t.id === args.task);
+      return task ? renderTask(task) : `Error: run '${run.runId}' has no task '${args.task}'.`;
+    }
+
+    case 'list': {
+      const runs = orchestrator.list(args.project_root, 15);
+      if (runs.length === 0) return 'No runs recorded for this project.';
+      return runs
+        .map((r) => {
+          const done = r.tasks.filter((t) => t.state === 'done').length;
+          return `${r.runId} [${r.status}] ${done}/${r.tasks.length} · ${r.goal}`;
+        })
+        .join('\n');
+    }
+
+    default:
+      return `Error: unknown action '${args.action}'. Use start, status, wait, approve, reject, show, stop, resume or list.`;
+  }
+}
+
 // ------------------------------------------------------------------- exports
 
 export const ALL_TOOLS: ToolDefinition[] = [
@@ -225,6 +347,80 @@ export const ALL_TOOLS: ToolDefinition[] = [
       required: ['task'],
     },
     handler: async (args) => handleAgent(args),
+  },
+
+  {
+    name: 'orchestrate',
+    description:
+      'Run a multi-step plan you have written as a dependency graph of subagents. Tasks with no unmet dependency run in parallel; a task that "needs" others starts only once they finish and receives their answers as its context. The run executes in the background and survives this call, so start it, then wait on it. Use a "checkpoint" task wherever you must run the tests or inspect the result yourself before the run continues — subagents cannot execute anything. Use plain "agent" instead for a single self-contained task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['start', 'status', 'wait', 'approve', 'reject', 'show', 'stop', 'resume', 'list'],
+          description:
+            'start: begin a plan | wait: park until the run needs you or ends | status: the board | show: one task\'s full answer | approve / reject: release or refuse a gated task | stop | resume: re-queue what an interrupted run left in flight | list',
+        },
+        plan: {
+          type: 'object',
+          description: 'start: the graph to execute.',
+          properties: {
+            goal: { type: 'string', description: 'What the run achieves, one line' },
+            tasks: {
+              type: 'array',
+              description: `Up to ${MAX_PLAN_TASKS} tasks. Array order is irrelevant; "needs" is what orders them.`,
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', description: 'Short unique id other tasks refer to' },
+                  task: { type: 'string', description: 'The full instruction, or what a checkpoint must verify' },
+                  kind: {
+                    type: 'string',
+                    enum: ['agent', 'checkpoint'],
+                    description: 'checkpoint runs nothing and waits for you to report back (default: agent)',
+                  },
+                  role: { type: 'string', enum: AGENT_ROLES, description: 'default: general' },
+                  needs: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Ids that must finish first. Their answers become this task\'s context — do not repeat them in "task".',
+                  },
+                  context: { type: 'string', description: 'Material not on disk and not from a dependency' },
+                  gate: { type: 'boolean', description: 'Hold for your approval before running' },
+                  allowSpawn: {
+                    type: 'boolean',
+                    description:
+                      'Let this task delegate parts of its own work. A delegate may hold a role this task does not, so a read-only task with allowSpawn can get files written. Set allowedTools to cap what its delegates may do.',
+                  },
+                  onFail: {
+                    type: 'string',
+                    enum: ['block', 'continue', 'abort'],
+                    description: 'On failure: block dependents (default), run them anyway with the error, or cancel the run',
+                  },
+                  retries: { type: 'number', description: 'Re-runs on failure (max 2)' },
+                  max_steps: { type: 'number', description: 'Tool round trips (default 8)' },
+                  model: { type: 'string' },
+                },
+                required: ['id', 'task'],
+              },
+            },
+          },
+          required: ['goal', 'tasks'],
+        },
+        run: { type: 'string', description: 'Run id. Omit to use this project\'s current run.' },
+        task: { type: 'string', description: 'Task id (approve, reject, show)' },
+        note: {
+          type: 'string',
+          description: 'approve / reject: what you found. On a checkpoint this note IS the result dependents read — put the test output in it.',
+        },
+        timeout_ms: { type: 'number', description: `wait: how long to park, up to ${MAX_WAIT_MS} (default 120000)` },
+        max_parallel: { type: 'number', description: 'start: tasks at once (capped by MAX_PARALLEL_TASKS)' },
+        ...WORKSPACE_PROPS,
+      },
+      required: ['action'],
+    },
+    handler: async (args) => handleOrchestrate(args),
   },
 
   {

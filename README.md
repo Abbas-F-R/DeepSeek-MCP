@@ -7,10 +7,14 @@ process, so only the final answer reaches your context.
 
 ## What it does
 
-- **Six tools instead of thirty-four.** `agent`, `agent_control`, `memory`, `review`,
-  `generate`, `analyze` — each with a `role`/`kind`/`action` discriminator. Tool schemas
-  are resent on every request, so a small surface is a permanent token saving.
-  Old tool names (`subagent_coder`, `review_code`, …) still work as hidden aliases.
+- **Seven tools instead of thirty-four.** `agent`, `orchestrate`, `agent_control`,
+  `memory`, `review`, `generate`, `analyze` — each with a `role`/`kind`/`action`
+  discriminator. Tool schemas are resent on every request, so a small surface is a
+  permanent token saving. Old tool names (`subagent_coder`, `review_code`, …) still
+  work as hidden aliases.
+- **Plans run as a graph.** Write a dependency graph of subagents and hand it over:
+  independent steps run in parallel, dependent ones inherit their predecessors'
+  answers, and the run survives the tool call that started it.
 - **Per-project isolation.** Every call is bound to one project root. File tools refuse
   any path that escapes it, so working in one repo can never touch another.
 - **Memory that fills itself.** Facts about the codebase, the rules it holds you to, and
@@ -29,8 +33,9 @@ process, so only the final answer reaches your context.
 /plugin install deepseek-subagents@deepseek-subagents
 ```
 
-One install, every project. Ships the tool backend, the skill, and six commands
-(`/deepseek-subagents:brief`, `delegate`, `generate`, `review`, `explore`, `save`).
+One install, every project. Ships the tool backend, the skill, and seven commands
+(`/deepseek-subagents:brief`, `delegate`, `orchestrate`, `generate`, `review`, `explore`,
+`save`).
 
 Put your key in your shell profile — never in a repo:
 
@@ -156,6 +161,79 @@ trustworthy — a subagent citing line 97 is reading "97" rather than counting.
 
 `search_files` takes a real glob, so a search can be scoped before it runs rather than
 filtered after: `*.ts`, `**/*.test.ts`, `src/**`, or a bare `.md`.
+
+## Orchestrated runs
+
+`agent` runs one task. `orchestrate` runs a plan of them — a dependency graph, written
+by the coordinating agent and executed verbatim:
+
+```
+orchestrate { action: "start", plan: {
+  goal: "Add refresh-token rotation",
+  tasks: [
+    { id: "scan",  role: "explore",    task: "Map src/auth." },
+    { id: "impl",  role: "coder",      task: "Add rotation.",        needs: ["scan"] },
+    { id: "tests", role: "coder",      task: "Cover the new path.",  needs: ["impl"] },
+    { id: "audit", role: "security",   task: "Audit it.",            needs: ["impl"] },
+    { id: "check", kind: "checkpoint", task: "Run npm test and report.", needs: ["tests", "audit"] },
+    { id: "fix",   role: "coder",      task: "Fix what it reported.", needs: ["check"] }
+  ]
+}}
+```
+
+`tests` and `audit` run at the same time; each dependent starts with its predecessors'
+answers already in its context, capped at 6k chars each and 20k in total.
+
+**The scheduler makes no model calls.** It resolves dependencies, holds a concurrency
+ceiling, and records state — arithmetic on a graph, so it is testable and cannot drift.
+Judgement about what to run stays with the agent that wrote the plan.
+
+**Checkpoints are where tests get run.** Subagents cannot execute anything, so a
+`checkpoint` task runs nothing: the graph stops, you run the suite, and the note you
+approve with becomes the result its dependents read.
+
+```
+orchestrate { action: "approve", task: "check",
+              note: "2 failing: auth.test.ts:41 expects 401, got 500" }
+```
+
+**The run outlives the call.** `start` returns the board immediately; `wait` parks until
+a gate opens or the run ends, up to 4 minutes per call. Polling a twenty-minute run costs
+more in tool calls than the run costs in tokens.
+
+```
+run-2026-08-06-77k2 [waiting] · Add a slugify helper alongside the existing string utilities
+4/5 done · 20.7k tok · 1m12s
+
+  done        scan     explore     2.4k tok  14s
+  done        impl     coder       5.4k tok  17s     src/slug.ts
+  done        tests    coder       9.4k tok  41s     src/slug.test.ts
+  done        audit    security    3.5k tok  12s
+  awaiting    verify   checkpoint                    ← Run the test suite and report the output.
+```
+
+**Nothing is lost when the chat closes.** Every state change is written to
+`.agent/runs/<id>.md` through a temp file and a rename. On shutdown, in-flight model
+calls are aborted and unfinished tasks are recorded as `interrupted`;
+`action: "resume"` re-queues exactly those. A run left `running` by a process that no
+longer exists is reported as interrupted rather than as working.
+
+| Failure policy | Effect on the graph |
+| :--- | :--- |
+| `block` (default) | dependents are blocked, unrelated branches still finish |
+| `continue` | dependents run anyway and are told what failed |
+| `abort` | the whole run is cancelled |
+
+**Delegation.** A task with `allowSpawn` gets a `spawn_agent` tool: it hands one piece
+of its work to another subagent and only that subagent's final answer comes back, up to
+two levels deep. The child appears as its own row in the run rather than as invisible
+work. Note that a delegate may hold a role its parent does not — a read-only task with
+`allowSpawn` can get files written — so set `allowedTools` to cap its delegates.
+
+**Parallel writes are refused, not merged.** Two tasks writing the same file is the one
+way this plugin could silently destroy work: the loser's edit vanishes with no error
+anywhere. A task claims a file on first write and the other is refused by name. All
+writes go through a temp file and a rename, so no reader ever sees a half-written file.
 
 ## Context pipeline
 

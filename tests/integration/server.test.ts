@@ -23,9 +23,17 @@ describe('MCP server protocol', () => {
     state.cleanup();
   });
 
-  test('advertises six tools', async () => {
+  test('advertises seven tools', async () => {
     const tools = await client.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), ['agent', 'agent_control', 'analyze', 'generate', 'memory', 'review']);
+    assert.deepEqual(tools.map((t) => t.name).sort(), [
+      'agent',
+      'agent_control',
+      'analyze',
+      'generate',
+      'memory',
+      'orchestrate',
+      'review',
+    ]);
   });
 
   test('the listed schema payload stays under 15k chars', async () => {

@@ -125,6 +125,7 @@ export class DeepSeekProvider implements AIProvider {
         const response = await this.client.chat.completions.create(
           payload as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming &
             DeepSeekExtraParams,
+          { signal: options.signal },
         );
 
         const executionTimeMs = Date.now() - startTime;
@@ -159,6 +160,7 @@ export class DeepSeekProvider implements AIProvider {
       {
         maxRetries: config.orchestrator.maxRetries,
         timeoutMs,
+        signal: options.signal,
       },
       `DeepSeek API Chat (${model})`,
     );
