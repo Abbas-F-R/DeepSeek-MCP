@@ -1,7 +1,7 @@
 {
   "name": "deepseek-subagents",
   "displayName": "DeepSeek Subagents",
-  "version": "2.0.0",
+  "version": "2.3.0",
   "description": "Delegate bounded coding sub-tasks — file generation, tests, reviews, codebase search — to DeepSeek subagents that read and write the project directly, keeping the work out of Claude's context.",
   "author": {
     "name": "Moamal Hussin"
