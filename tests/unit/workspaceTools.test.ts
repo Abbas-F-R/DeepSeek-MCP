@@ -26,6 +26,33 @@ describe('workspace tools', () => {
     assert.match(out, /export function sum/);
   });
 
+  test('read_file numbers its lines so the agent can cite file:line', async () => {
+    const out = await WORKSPACE_TOOLS.read_file.execute({ path: 'src/math.ts' }, ctx);
+    assert.match(out, /^\[src\/math\.ts, \d+ lines\]/);
+    assert.match(out, /^\s*1\| export function sum/m);
+  });
+
+  test('read_file returns just the requested range', async () => {
+    // The point of the range is not to read a whole file to see part of it.
+    sandbox.write(
+      'src/big.ts',
+      `${Array.from({ length: 400 }, (_, i) => `export const value${i} = ${i}; // ordinary source`).join('\n')}\n`
+    );
+
+    const whole = await WORKSPACE_TOOLS.read_file.execute({ path: 'src/big.ts' }, ctx);
+    const slice = await WORKSPACE_TOOLS.read_file.execute({ path: 'src/big.ts', offset: 100, limit: 5 }, ctx);
+
+    assert.match(slice, /lines 100-104 of 401/);
+    assert.match(slice, /100\| export const value99/);
+    assert.doesNotMatch(slice, /^\s*1\| /m, 'lines before the offset are not included');
+    assert.ok(slice.length < whole.length / 20, `a five-line range cost ${slice.length} of ${whole.length} chars`);
+  });
+
+  test('read_file rejects an offset past the end', async () => {
+    const out = await WORKSPACE_TOOLS.read_file.execute({ path: 'src/math.ts', offset: 9000 }, ctx);
+    assert.match(out, /is past the end/);
+  });
+
   test('read_file reports missing files and directories without throwing', async () => {
     assert.match(await WORKSPACE_TOOLS.read_file.execute({ path: 'src/nope.ts' }, ctx), /file not found/);
     assert.match(await WORKSPACE_TOOLS.read_file.execute({ path: 'src' }, ctx), /is a directory/);
@@ -96,9 +123,22 @@ describe('workspace tools', () => {
     const regex = await WORKSPACE_TOOLS.search_files.execute({ query: 'export (const|function)', regex: true }, ctx);
     assert.match(regex, /src\/math\.ts/);
 
+    // A bare extension is the shorthand models reach for, and what the old
+    // suffix-matching filter accepted.
     const filtered = await WORKSPACE_TOOLS.search_files.execute({ query: 'Sandbox App', file_glob: '.md' }, ctx);
     assert.match(filtered, /README\.md/);
     assert.doesNotMatch(filtered, /\.ts:/);
+
+    const starred = await WORKSPACE_TOOLS.search_files.execute({ query: 'export', file_glob: '*.ts' }, ctx);
+    assert.match(starred, /src\/math\.ts/);
+
+    // Path globs are the point of the change — these matched nothing before.
+    const scoped = await WORKSPACE_TOOLS.search_files.execute({ query: 'export', file_glob: 'src/**' }, ctx);
+    assert.match(scoped, /src\//);
+    assert.doesNotMatch(scoped, /README\.md/);
+
+    const nested = await WORKSPACE_TOOLS.search_files.execute({ query: 'export', file_glob: '**/*.ts' }, ctx);
+    assert.match(nested, /src\/math\.ts/);
 
     const invalid = await WORKSPACE_TOOLS.search_files.execute({ query: '([unclosed', regex: true }, ctx);
     assert.match(invalid, /invalid regular expression/);

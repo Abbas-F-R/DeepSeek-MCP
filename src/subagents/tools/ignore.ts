@@ -194,7 +194,7 @@ export function isIgnored(rules: IgnoreRules, relativePath: string, isDirectory 
  * `**` across segments, `?`, character classes, leading `/` for anchoring, and
  * an unanchored pattern matching at any depth.
  */
-function globToRegExp(pattern: string): RegExp {
+export function globToRegExp(pattern: string): RegExp {
   const anchored = pattern.startsWith('/');
   const body = anchored ? pattern.slice(1) : pattern;
 

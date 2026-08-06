@@ -140,6 +140,23 @@ Dot-directories such as `.github` and `.claude` **are** searchable — only the 
 rules decide. Reads over 2 MB are refused with a pointer to `search_files`, and files
 over 1 MB are skipped while searching.
 
+## Reading narrowly
+
+`read_file` takes `offset` and `limit`, and returns line-numbered output:
+
+```
+[src/big.ts lines 100-104 of 401]
+100| export const value99 = 99;
+101| export const value100 = 100;
+```
+
+Measured on a 400-line file: reading the whole thing is ~7,145 tokens, the five lines
+that mattered are ~99. The numbers are also why `file:line` anchors in memory are
+trustworthy — a subagent citing line 97 is reading "97" rather than counting.
+
+`search_files` takes a real glob, so a search can be scoped before it runs rather than
+filtered after: `*.ts`, `**/*.test.ts`, `src/**`, or a bare `.md`.
+
 ## Context pipeline
 
 A subagent's own history is shaped before every model call, cheapest layer first — the

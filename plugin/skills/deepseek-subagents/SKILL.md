@@ -91,6 +91,10 @@ Every path is resolved against the project root. Anything outside it is refused.
 Dot-directories like `.github` and `.claude` **are** searchable; only the ignore rules
 decide.
 
+`read_file` takes `offset`/`limit` and returns line-numbered output, so a subagent reads
+the part it needs and cites accurate `file:line`. `search_files` takes a real glob
+(`**/*.test.ts`, `src/**`) — scoping a search beats filtering its results.
+
 ## Examples
 
 ```
