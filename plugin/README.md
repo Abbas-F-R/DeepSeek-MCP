@@ -23,14 +23,14 @@ Restart Claude Code (or `/reload-plugins`) afterwards.
 
 ## Commands
 
-| Command | Does |
-| :--- | :--- |
-| `/deepseek-subagents:brief` | Load project memory, open or resume a chat thread |
+| Command                        | Does                                                 |
+| :----------------------------- | :--------------------------------------------------- |
+| `/deepseek-subagents:brief`    | Load project memory, open or resume a chat thread    |
 | `/deepseek-subagents:delegate` | Route a side task to the right subagent — or keep it |
-| `/deepseek-subagents:generate` | Write a file, module, or test suite |
-| `/deepseek-subagents:review` | Review, audit, or propose a refactor for a path |
-| `/deepseek-subagents:explore` | Find code and answer structure questions |
-| `/deepseek-subagents:save` | Record where this chat stopped |
+| `/deepseek-subagents:generate` | Write a file, module, or test suite                  |
+| `/deepseek-subagents:review`   | Review, audit, or propose a refactor for a path      |
+| `/deepseek-subagents:explore`  | Find code and answer structure questions             |
+| `/deepseek-subagents:save`     | Record where this chat stopped                       |
 
 The tools (`agent`, `agent_control`, `memory`, `review`, `generate`, `analyze`) are
 also available directly; the commands are shortcuts with the routing rules baked in.
@@ -72,9 +72,3 @@ does not get more expensive as it gets more useful.
 
 Commit `.agent/memory/` if you want the project's knowledge to travel with the repo;
 the default `.gitignore` treats it as local state.
-
-## Note while the v2 branch is open
-
-`.mcp.json` currently pins `github:Abbas-F-R/DeepSeek-MCP#moamal/refactoring/v2`.
-Once that branch merges, drop the `#moamal/refactoring/v2` suffix so the plugin
-tracks the default branch.
