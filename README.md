@@ -115,6 +115,48 @@ against a throwaway fixture project in `$TMPDIR`, never a real repo. To run one:
 node --import tsx --test --test-name-pattern="@coder writes" tests/live/agents.test.ts
 ```
 
+## What subagents cannot see
+
+Anything a subagent reads is sent verbatim to a model provider, so the boundary is
+enforced in the tools rather than left to the prompt.
+
+**Credential files are refused by every tool**, reads and writes alike — `.env*`,
+`*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, cloud credentials, `secrets.*`,
+`terraform.tfstate`. This is not configurable. `list_directory` will not even name them.
+Templates like `.env.example` and `*.pub` stay readable.
+
+**Ignored paths** are skipped when walking the tree: build output, dependencies and
+caches by default, plus everything in `.gitignore` and `.agentignore`. Both use
+gitignore syntax, including `**`, character classes and `!` negation:
+
+```gitignore
+# .agentignore — keep the agent out of things that are big or irrelevant
+fixtures/**
+*.generated.ts
+!src/keep.generated.ts
+```
+
+Dot-directories such as `.github` and `.claude` **are** searchable — only the ignore
+rules decide. Reads over 2 MB are refused with a pointer to `search_files`, and files
+over 1 MB are skipped while searching.
+
+## Reading narrowly
+
+`read_file` takes `offset` and `limit`, and returns line-numbered output:
+
+```
+[src/big.ts lines 100-104 of 401]
+100| export const value99 = 99;
+101| export const value100 = 100;
+```
+
+Measured on a 400-line file: reading the whole thing is ~7,145 tokens, the five lines
+that mattered are ~99. The numbers are also why `file:line` anchors in memory are
+trustworthy — a subagent citing line 97 is reading "97" rather than counting.
+
+`search_files` takes a real glob, so a search can be scoped before it runs rather than
+filtered after: `*.ts`, `**/*.test.ts`, `src/**`, or a bare `.md`.
+
 ## Context pipeline
 
 A subagent's own history is shaped before every model call, cheapest layer first — the

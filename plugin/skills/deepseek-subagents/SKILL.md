@@ -75,6 +75,26 @@ next chat starts blind.
 
 Every path is resolved against the project root. Anything outside it is refused.
 
+## What subagents cannot see
+
+- **Credential files are refused by every tool**, reads and writes alike — `.env*`,
+  `*.pem`, `*.key`, `id_rsa`, `.npmrc`, `.netrc`, cloud credentials, `secrets.*`,
+  `terraform.tfstate`. Not configurable: anything a subagent reads is sent to the model
+  provider. Templates (`.env.example`) and public keys stay readable. If a task needs a
+  secret value, ask the user for it.
+- **Ignored paths** — build output, dependencies and caches by default, plus whatever
+  `.gitignore` and `.agentignore` say. `.agentignore` uses gitignore syntax and is the
+  place to exclude big fixtures, generated code or vendored trees.
+- **Oversized files** — reads over 2 MB are refused with a pointer to `search_files`;
+  files over 1 MB are skipped when searching.
+
+Dot-directories like `.github` and `.claude` **are** searchable; only the ignore rules
+decide.
+
+`read_file` takes `offset`/`limit` and returns line-numbered output, so a subagent reads
+the part it needs and cites accurate `file:line`. `search_files` takes a real glob
+(`**/*.test.ts`, `src/**`) — scoping a search beats filtering its results.
+
 ## Examples
 
 ```
