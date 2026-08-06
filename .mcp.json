@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "deepseek-subagents": {
+      "command": "npx",
+      "args": ["-y", "deepseek-subagents"],
+      "env": {
+        "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}"
+      }
+    }
+  }
+}

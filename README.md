@@ -28,6 +28,8 @@ process, so only the final answer reaches your context.
 
 ## Install
 
+### As a Claude Code Plugin
+
 ```
 /plugin marketplace add Abbas-F-R/DeepSeek-MCP
 /plugin install deepseek-subagents@deepseek-subagents
@@ -36,6 +38,46 @@ process, so only the final answer reaches your context.
 One install, every project. Ships the tool backend, the skill, and seven commands
 (`/deepseek-subagents:brief`, `delegate`, `orchestrate`, `generate`, `review`, `explore`,
 `save`).
+
+### As an MCP Server (Cursor, Claude Desktop, Windsurf, VS Code, etc.)
+
+Add to your MCP configuration (`.mcp.json` or `mcp.json` or host MCP settings):
+
+```json
+{
+  "mcpServers": {
+    "deepseek-subagents": {
+      "command": "npx",
+      "args": ["-y", "deepseek-subagents"],
+      "env": {
+        "DEEPSEEK_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+Or for local repository usage:
+
+```json
+{
+  "mcpServers": {
+    "deepseek-subagents": {
+      "command": "node",
+      "args": ["/path/to/DeepSeek-MCP/dist/index.js"],
+      "env": {
+        "DEEPSEEK_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+### Global Skill Discovery
+
+A top-level [`SKILL.md`](SKILL.md) file is provided at the repository root. Any AI agent or assistant supporting SKILL.md standards can load the contract and capabilities directly.
+
+### Environment Variable
 
 Put your key in your shell profile — never in a repo:
 

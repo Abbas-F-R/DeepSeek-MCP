@@ -101,7 +101,7 @@ export function resolveWorkspace(explicitRoot?: string): WorkspaceRef {
       );
     }
   } else {
-    const envRoot = process.env.PROJECT_ROOT || process.env.MCP_WORKSPACE_ROOT;
+    const envRoot = process.env.PROJECT_ROOT || process.env.MCP_WORKSPACE_ROOT || process.env.CLAUDE_PROJECT_DIR || process.env.WORKSPACE_ROOT;
     const base = envRoot && isDirectory(path.resolve(envRoot)) ? path.resolve(envRoot) : process.cwd();
     root = envRoot ? base : walkUpToProjectRoot(base);
   }

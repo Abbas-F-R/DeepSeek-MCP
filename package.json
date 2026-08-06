@@ -28,6 +28,9 @@
     "test:live": "npm run build && node --import tsx --test tests/live/*.test.ts"
   },
   "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
     "claude-code",
     "claude-code-plugin",
     "plugin",
