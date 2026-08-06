@@ -10,10 +10,10 @@ const { ALL_TOOLS, TOOL_ALIASES, resolveToolCall } = await import('../../src/too
 describe('tool surface', () => {
   after(() => state.cleanup());
 
-  test('exactly six tools are advertised', () => {
+  test('exactly seven tools are advertised', () => {
     assert.deepEqual(
       ALL_TOOLS.map((t) => t.name).sort(),
-      ['agent', 'agent_control', 'analyze', 'generate', 'memory', 'review']
+      ['agent', 'agent_control', 'analyze', 'generate', 'memory', 'orchestrate', 'review']
     );
   });
 

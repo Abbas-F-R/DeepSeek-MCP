@@ -14,6 +14,11 @@ export interface ChatOptions {
   stream?: boolean;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max' | string;
   tools?: any[];
+  /**
+   * Aborts the request in flight. Without it a cancelled run keeps paying for
+   * the model call it started, and the process cannot exit until it returns.
+   */
+  signal?: AbortSignal;
 }
 
 export interface TokenUsage {

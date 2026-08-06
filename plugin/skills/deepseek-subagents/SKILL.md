@@ -1,6 +1,6 @@
 ---
 name: deepseek-subagents
-description: Delegate engineering work to DeepSeek subagents that read and write the current project directly. Six tools (agent, agent_control, memory, review, generate, analyze) over a self-filling markdown memory — facts about the codebase are captured after every run, so a thread survives restarts and never leaks between projects.
+description: Delegate engineering work to DeepSeek subagents that read and write the current project directly. Seven tools (agent, orchestrate, agent_control, memory, review, generate, analyze) over a self-filling markdown memory — one subagent for a bounded task, a dependency graph of them for a plan, and facts about the codebase captured after every run, so a thread survives restarts and never leaks between projects.
 ---
 
 # DeepSeek Subagents
@@ -55,6 +55,7 @@ next chat starts blind.
 | Tool | Use |
 | :--- | :--- |
 | `agent` | Run a subagent. `role`: explore, scout, general, coder, security, sql, custom |
+| `orchestrate` | Run a plan as a dependency graph of subagents. `action`: start, wait, status, show, approve, reject, stop, resume, list |
 | `agent_control` | `action`: list, status, stop, persona |
 | `memory` | `action`: brief, recall, project, rule, rule_remove, set, rescan, remember, chat_start, chat_save, chat_get, chat_list, verify, compact, stats, projects |
 | `review` | `kind`: code, folder, project, sql, architecture, security, performance, refactor |
@@ -94,6 +95,79 @@ decide.
 `read_file` takes `offset`/`limit` and returns line-numbered output, so a subagent reads
 the part it needs and cites accurate `file:line`. `search_files` takes a real glob
 (`**/*.test.ts`, `src/**`) — scoping a search beats filtering its results.
+
+## Running a plan
+
+`agent` is one task. `orchestrate` is a plan of them: a dependency graph you
+write, executed for you. Tasks with no unmet dependency run in parallel; a task
+that `needs` others starts only when they finish and **receives their answers as
+its context** — so never restate a predecessor's output in a dependent's `task`.
+
+```
+orchestrate { action: "start", plan: {
+  goal: "Add refresh-token rotation",
+  tasks: [
+    { id: "scan",  role: "explore", task: "Map src/auth: what issues tokens, what validates them." },
+    { id: "impl",  role: "coder",   task: "Add rotation. Match the error handling you are shown.", needs: ["scan"] },
+    { id: "tests", role: "coder",   task: "Cover the rotation path.", needs: ["impl"] },
+    { id: "audit", role: "security", task: "Audit the new code for replay and fixation.", needs: ["impl"] },
+    { id: "check", kind: "checkpoint", task: "Run npm test and report the output.", needs: ["tests", "audit"] },
+    { id: "fix",   role: "coder",   task: "Fix what the test run reported.", needs: ["check"] }
+  ]
+}}
+```
+
+`tests` and `audit` run at the same time. Then everything stops at `check`.
+
+**The run keeps going after the call returns.** `start` gives you the board and
+comes straight back. Then:
+
+```
+orchestrate { action: "wait" }      -> returns when the run needs you, or ends
+```
+
+`wait` parks until a gate opens or the run finishes; it is the loop, not polling.
+`run` defaults to this project's current run, so you rarely pass it.
+
+### Checkpoints are how tests get run
+
+Subagents cannot execute anything, so a plan that writes code and never checks it
+is a plan that reports success it has not earned. A `checkpoint` task runs
+nothing: the graph waits, you do the thing, and your `note` becomes the result
+the dependent tasks read.
+
+```
+orchestrate { action: "approve", task: "check",
+              note: "2 failing: auth.test.ts:41 expects 401, got 500" }
+```
+
+That note is what `fix` receives as its context. `reject` skips the task instead
+and blocks whatever depended on it. Use `gate: true` on an ordinary task to hold
+it for approval before it runs at all.
+
+### The rest
+
+| Field | Effect |
+| :--- | :--- |
+| `onFail` | `block` (default) stops dependents but lets unrelated branches finish · `continue` runs them anyway with the error as context · `abort` cancels the run |
+| `retries` | re-runs on failure, max 2 |
+| `allowSpawn` | lets that task delegate parts of its own work, up to two levels deep |
+| `allowedTools` | narrows the task's permissions, and caps what its delegates may do |
+
+`allowSpawn` is a real privilege change: a delegate may hold a role its parent
+does not, so a read-only task with `allowSpawn` can get files written. Set
+`allowedTools` when that is not what you want.
+
+Two tasks cannot write the same file — the second is refused by name. Split the
+work by file, or order it with `needs`.
+
+**Stopping and restarting.** Closing the chat stops the run: in-flight model calls
+are cancelled and every unfinished task is recorded as `interrupted`. Nothing is
+lost — `orchestrate { action: "resume" }` re-queues exactly what was in flight.
+`action: "stop"` cancels on purpose.
+
+Use plain `agent` for a single self-contained task. A graph is worth its overhead
+when steps depend on each other, run in parallel, or need you in the middle.
 
 ## Examples
 
@@ -146,6 +220,7 @@ code yourself and the fact comes back marked `STALE: this code changed since` �
 check runs automatically on whatever is about to be injected, so a claim about code
 you have since rewritten never arrives dressed as fact. Subagents cannot run anything,
 so **you** run the tests and feed failures back; never assume generated code works.
+Inside a plan, a `checkpoint` task is where that happens.
 
 Facts decay: `memory { action: "verify" }` re-checks every anchor against the working
 tree, weakens what no longer resolves and archives what falls below the floor.

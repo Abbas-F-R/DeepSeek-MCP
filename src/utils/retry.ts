@@ -6,6 +6,17 @@ export interface RetryOptions {
   maxDelayMs?: number;
   backoffFactor?: number;
   timeoutMs?: number;
+  /** Cancels the attempt in flight, and stops any further attempt being made. */
+  signal?: AbortSignal;
+}
+
+/** True when a rejection is the caller cancelling rather than the call failing. */
+export function isAbort(error: any): boolean {
+  return (
+    error?.name === 'AbortError' ||
+    error?.name === 'APIUserAbortError' ||
+    /aborted|cancell?ed/i.test(String(error?.message || ''))
+  );
 }
 
 export async function withTimeout<T>(
@@ -42,10 +53,12 @@ export async function withRetry<T>(
   const backoffFactor = options.backoffFactor ?? 2;
   const timeoutMs = options.timeoutMs;
 
+  const signal = options.signal;
   let attempt = 0;
   let delay = initialDelayMs;
 
   while (true) {
+    if (signal?.aborted) throw new Error(`${operationName} was cancelled.`);
     attempt++;
     try {
       if (timeoutMs) {
@@ -53,6 +66,13 @@ export async function withRetry<T>(
       }
       return await fn();
     } catch (error: any) {
+      // A cancelled call is not a failed call: retrying it would keep paying
+      // for work whose result nobody is waiting for any more.
+      if (signal?.aborted || isAbort(error)) {
+        logger.info(`[Retry] ${operationName} cancelled; not retrying.`);
+        throw new Error(`${operationName} was cancelled.`);
+      }
+
       const isLastAttempt = attempt > maxRetries;
       logger.warn(`[Retry] ${operationName} failed (Attempt ${attempt}/${maxRetries + 1}): ${error.message || error}`);
 

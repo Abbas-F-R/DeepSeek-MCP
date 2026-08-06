@@ -125,8 +125,15 @@ export class SubagentManager {
       ? { name: customDef.personaName, prompt: customDef.systemPrompt }
       : SYSTEM_PROMPTS[role] || SYSTEM_PROMPTS.custom;
 
-    const allowedTools =
+    const baseTools =
       options.allowedTools || (customDef ? customDef.allowedTools : undefined) || ROLE_TOOLS[role] || ROLE_TOOLS.custom;
+
+    // Delegation is a permission, not a role trait: it exists only for a task
+    // whose plan entry asked for it, and only while there is depth left.
+    const allowedTools =
+      options.orchestration?.allowSpawn && !baseTools.includes('spawn_agent')
+        ? [...baseTools, 'spawn_agent' as SubagentToolName]
+        : baseTools;
 
     let session: SubagentSession | undefined = options.sessionId ? this.lookupSession(store, options.sessionId) : undefined;
     let isNewSession = false;
@@ -183,7 +190,7 @@ export class SubagentManager {
     const model = options.model || config.deepseek.defaultModel;
     const provider = ProviderRegistry.getInstance().getProvider(providerId);
     const toolSchemas = getOpenAIToolSchemas(session.allowedTools);
-    const toolCtx: WorkspaceToolContext = { root, touchedFiles: [] };
+    const toolCtx: WorkspaceToolContext = { root, touchedFiles: [], orchestration: options.orchestration };
 
     let finalContent = '';
     let finalReasoning: string | undefined;
@@ -194,7 +201,7 @@ export class SubagentManager {
       stepsLeft--;
 
       const live = this.lookupSession(store, session.sessionId);
-      if (live?.status === 'cancelled') {
+      if (live?.status === 'cancelled' || options.signal?.aborted) {
         session.status = 'cancelled';
         this.persist(store, session);
         throw new Error(`Session '${session.sessionId}' was cancelled mid-run.`);
@@ -205,6 +212,7 @@ export class SubagentManager {
           model,
           temperature: options.temperature ?? 0.2,
           tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+          signal: options.signal,
         });
 
         finalContent = response.content || '';
@@ -280,7 +288,7 @@ export class SubagentManager {
     // Running out of steps used to return an empty placeholder, throwing away
     // every token the run had already spent. Force one tool-free turn instead:
     // the subagent must answer from what it gathered.
-    if (stepsLeft === 0 && session.status === 'active') {
+    if (stepsLeft === 0 && session.status === 'active' && !options.signal?.aborted) {
       session.messages.push({
         role: 'user',
         content:
@@ -293,6 +301,7 @@ export class SubagentManager {
         const response = await provider.chat(await this.prepareMessages(session), {
           model,
           temperature: options.temperature ?? 0.2,
+          signal: options.signal,
         });
         if (response.content) {
           finalContent = response.content;
